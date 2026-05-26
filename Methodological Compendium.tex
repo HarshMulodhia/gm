@@ -5,6 +5,7 @@
 ]{article}
 \usepackage{xcolor}
 \usepackage{amsmath,amssymb}
+\usepackage[letterpaper,margin=1in]{geometry}
 \setcounter{secnumdepth}{-\maxdimen} % remove section numbering
 \usepackage{iftex}
 \ifPDFTeX
@@ -114,6 +115,7 @@
 \newcommand{\cL}{\mathcal{L}}
 
 \begin{document}
+\onecolumn
 \maketitle
 
 \section{Methodological Compendium for Designing a
@@ -1106,6 +1108,108 @@ defines a valid superposed generator under standard domain conditions, enabling 
   \item \textbf{ACT (Action Chunking with Transformers):} Uses chunked action prediction and temporal ensembling for precise long-horizon bimanual manipulation with practical low-cost robot setups.
   \item \textbf{OpenVLA:} Demonstrates scalable vision-language-action learning with strong cross-embodiment transfer, motivating unified OpenArm policies conditioned on rich visual-linguistic context.
   \item \textbf{Isaac Lab ecosystem practice:} Supports GPU-parallel simulation, standardized robotics interfaces, and sim-to-real deployment loops that align with the phased pipeline in this compendium.
+\end{itemize}
+
+\subsection{Detailed Generator-Matching Extensions from arXiv:2412.06264}
+
+This section adds formal GM constructions that are directly reusable for OpenArm VLA policies when one needs richer training targets and more expressive sampling dynamics.{[}\^{}4{]}
+
+\subsubsection{A. Universal Euclidean Generator Decomposition}
+
+For \(S=\mathbb{R}^d\), arXiv:2412.06264 gives a universal decomposition of admissible generators:
+\[
+[L_t f](x)
+= \nabla f(x)^\top u_t(x)
++ \tfrac12 \nabla^2 f(x) : \Sigma_t(x)
++ \int \bigl(f(y)-f(x)\bigr)Q_t(\mathrm{d}y;x),
+\]
+where \(u_t\) is the flow field, \(\Sigma_t \succeq 0\) is the diffusion covariance, and \(Q_t\) is a jump measure.{[}\^{}4{]}
+
+For OpenArm policies, this gives an exact theoretical basis for combining: (i) deterministic chunk predictors, (ii) diffusion action denoisers, and (iii) mode-switch or regrasp jumps in one model family.
+
+\subsubsection{B. Conditional-to-Marginal Generator Construction}
+
+If \(L_t^{z}\) is a valid generator for each conditional path \(p_t(\cdot\mid z)\), the marginal path generator can be written as
+\[
+[L_t f](x)=\mathbb{E}_{z\sim p_{1\mid t}(\mathrm{d}z\mid x)}\!\left[L_t^{z}f(x)\right].
+\]
+In component form this yields
+\[
+u_t(x)=\mathbb{E}[u_t(x\mid z)\mid x],\qquad
+\Sigma_t(x)=\mathbb{E}[\Sigma_t(x\mid z)\mid x],\qquad
+Q_t(\mathrm{d}y;x)=\mathbb{E}[Q_t(\mathrm{d}y;x\mid z)\mid x].
+\]
+These equations are useful for implementing posterior-averaged OpenArm action generators conditioned on observation-language context.{[}\^{}4{]}
+
+\subsubsection{C. Linear Generator Parameterization and Bregman Training}
+
+arXiv:2412.06264 parameterizes generators as
+\[
+[L_t f](x)=\langle Kf(x),F_t(x)\rangle_V,
+\]
+with \(K\) fixed and \(F_t\) learned. Using a Bregman divergence
+\[
+D(a,b)=\varphi(a)-\varphi(b)-\langle a-b,\nabla\varphi(b)\rangle_V,
+\]
+the conditional objective is
+\[
+\mathcal{L}_{\mathrm{CGM}}(\theta)
+=\mathbb{E}_{t,z,x\sim p_t(\cdot\mid z)}
+\bigl[D(F_t^{z}(x),F_t^{\theta}(x))\bigr].
+\]
+The paper proves gradient equivalence with the marginal GM loss:
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{GM}}(\theta)
+=\nabla_\theta \mathcal{L}_{\mathrm{CGM}}(\theta).
+\]
+This justifies training OpenArm models with conditional supervision while still optimizing the intended marginal process.{[}\^{}4{]}
+
+\subsubsection{D. Constructive Jump and Diffusion Examples}
+
+The paper provides explicit constructive solutions that demonstrate how non-standard generators can still realize prescribed paths:{[}\^{}4{]}
+\begin{itemize}
+  \item \textbf{Pure jump CondOT realization (1D):}
+  \[
+  Q_t(x';x\mid z)=\frac{[k_t(x)]_+[-k_t(x')]_+\,p_t(x'\mid z)}
+  {(1-t)^3\int[-k_t(\tilde x)]_+p_t(\tilde x\mid z)\,\mathrm{d}\tilde x},
+  \]
+  with
+  \[
+  k_t(x)=x^2-(t+1)xz-(1-t)^2+t z^2,\qquad [a]_+=\max(a,0).
+  \]
+  \item \textbf{Pure diffusion mixture-path realization:}
+  \[
+  p_t(\mathrm{d}x\mid z)=\kappa_t\delta_z(\mathrm{d}x)+(1-\kappa_t)\mathrm{Unif}[a_1,a_2](\mathrm{d}x),
+  \]
+  and a drift-free SDE with state-dependent variance
+  \[
+  \sigma_t^2(x\mid z)=
+  \frac{2\dot\kappa_t(a_2-a_1)}{1-\kappa_t}
+  \left[
+  \frac{(z-a_1)^2}{2(a_2-a_1)}
+  +[x-z]_+
+  -\frac{(x-a_1)^2}{2(a_2-a_1)}
+  \right].
+  \]
+\end{itemize}
+
+For robotics, these constructions motivate hybrid samplers where diffusion handles fine continuous corrections while jumps capture sparse strategy switches.
+
+\subsubsection{E. Predictor--Corrector and Superposition Identities}
+
+Because the KFE is linear, valid generators can be combined:
+\[
+\widetilde L_t=\alpha_{1,t}L_t+\alpha_{2,t}L_t',\qquad
+\alpha_{1,t},\alpha_{2,t}\ge 0,\ \alpha_{1,t}+\alpha_{2,t}=1.
+\]
+Additionally, divergence-free corrections \(L_t^{\mathrm{div}}\) may be added when
+\(\langle p_t,L_t^{\mathrm{div}}f\rangle=0\), yielding predictor--corrector families that preserve marginals while changing trajectories.{[}\^{}4{]}
+
+\subsection{Primary arXiv Source Pointers}
+
+\begin{itemize}
+  \item \textbf{arXiv:2506.02070} (layout target): \url{https://arxiv.org/pdf/2506.02070}
+  \item \textbf{arXiv:2412.06264} (generator-matching equations and constructions): \url{https://arxiv.org/pdf/2412.06264}
 \end{itemize}
 
 \end{document}
