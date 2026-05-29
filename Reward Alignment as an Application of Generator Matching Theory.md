@@ -1,304 +1,525 @@
-# Reward Alignment as an Application of Generator Matching Theory
+# Lecture Notes: Reward Alignment as an Application of Generator Matching Theory
 
 ## Part III in the Series
 
-This note is intended as **Part III** after:
-1. **Flow/Diffusion lecture notes** (`lecture_notes.pdf`), and
-2. **Generator Matching Theory Companion Notes**.
+These notes are written as **lecture notes** for the reward-alignment layer that sits on top of the probability-path, flow/diffusion, CTMC, and Generator Matching (GM) foundations developed earlier.
 
-It keeps the same notation:\
-\(p_t\) (probability path), \(L_t\) (generator), \(L_t^*\) (adjoint), \(p_{1\mid t}(z\mid x)\) (posterior), and conditional-to-marginal averaging from GM.
+They assume familiarity with the following objects:
+- \(p_t\): a probability path over states,
+- \(L_t\): a time-dependent infinitesimal generator,
+- \(L_t^*\): the adjoint generator in the Kolmogorov forward equation,
+- \(K_{t+h\mid t}\): a Markov transition kernel,
+- conditional-to-marginal averaging identities from Conditional Generator Matching (CGM).
 
-We only cover **new reward-alignment concepts**, treating earlier flow/diffusion/GM basics as already known.
+The present document asks a more advanced question:
 
----
+> Once a pretrained generator already produces high-quality samples from a base law, how should we **retarget the dynamics** so that the terminal or path-space law prefers high-reward outcomes while preserving sample quality, diversity, and computational tractability?
 
-## 1. Reward Alignment in GM Language
-
-### 1.1 Base path and aligned path
-
-Let a pretrained generator induce marginals \((p_t)_{t\in[0,1]}\), with terminal \(p_1\approx p_{\text{data}}\).\
-Given reward \(r(x)\), alignment usually targets a tilted terminal law:
-\[
-\pi_1(x) \propto p_1(x)\exp(\beta r(x)).
-\]
-A path-space version uses trajectory rewards \(R(X_{0:1})\):
-\[
-\frac{\mathrm d\Pi^{\text{align}}}{\mathrm d\Pi^{\text{base}}}(X_{0:1}) \propto \exp\big(\beta R(X_{0:1})\big),
-\]
-which is the Feynman--Kac viewpoint used in inference-time steering.
-
-### 1.2 GM perspective on alignment
-
-In GM terms, reward alignment is selecting a new generator family \(\widetilde L_t\) such that:
-\[
-\partial_t\langle \widetilde p_t,f\rangle = \langle \widetilde p_t,\widetilde L_t f\rangle,
-\]
-with terminal \(\widetilde p_1\) matching reward preferences.\
-So alignment is **generator design/training under a reward-tilted target law**, not a separate paradigm.
-
-### 1.3 A common regularized objective
-
-Many alignment methods instantiate:
-\[
-\max_{q}\; \mathbb E_{x\sim q}[r(x)]-\tau\,D_{\mathrm{KL}}\big(q\|p_1\big),
-\]
-whose optimizer is exactly Gibbs-tilted \(q^*(x)\propto p_1(x)e^{r(x)/\tau}\).\
-This objective appears across flow/diffusion RL fine-tuning, reward-guided sampling, and map distillation.
+The core thesis is that reward alignment is not a separate paradigm from GM. It is a **change-of-target-law** problem, and therefore a **change-of-generator / change-of-transition-law** problem.
 
 ---
 
-## 2. Paper-by-Paper: Main Reward-Alignment Ideas in GM Form
+## Lecture 0 — Mathematical Preliminaries for Reward Alignment
 
-## 2.1 GLASS Flows (arXiv:2509.25170)
+### 0.1 Base model, aligned model, and terminal tilting
+
+Let a pretrained generative model induce a path \((p_t)_{t\in[0,1]}\), with terminal marginal \(p_1\). In the base setting we think of \(p_1\) as approximating a data or preference-agnostic target. Reward alignment introduces a reward function \(r:S\to\mathbb R\) and seeks a new terminal law \(\pi_1\) that concentrates more mass on high-reward states.
+
+The canonical aligned terminal law is the Gibbs tilt
+\[
+\pi_1(x) = \frac{1}{Z_\beta}p_1(x)e^{\beta r(x)},
+\qquad
+Z_\beta = \int p_1(x)e^{\beta r(x)}dx,
+\]
+where \(\beta>0\) controls alignment strength.
+
+This form is not arbitrary. It is the optimizer of the KL-regularized variational problem
+\[
+\max_q \; \mathbb E_{x\sim q}[r(x)] - \tau D_{\mathrm{KL}}(q\|p_1),
+\]
+with \(\tau = 1/\beta\). Thus, reward alignment is a constrained optimization problem balancing reward seeking against deviation from the pretrained law.
+
+### 0.2 Path-space tilting and the Feynman--Kac viewpoint
+
+If the reward is path-dependent, one works not merely with terminal samples but with the full law \(\Pi^{\text{base}}\) over trajectories \(X_{0:1} = (X_t)_{t\in[0,1]}\). The aligned path law is then
+\[
+\frac{d\Pi^{\text{align}}}{d\Pi^{\text{base}}}(X_{0:1})
+\propto e^{\beta R(X_{0:1})},
+\]
+where \(R\) is a terminal reward, a trajectory reward, or a cumulative potential.
+
+This is the Feynman--Kac viewpoint: the reward reweights entire trajectories, not only final states. From a stochastic-process perspective, alignment can therefore be seen as transforming the effective semigroup or transition law so that the new process places more probability on reward-rich paths.
+
+### 0.3 Generator-language statement of the alignment problem
+
+Suppose the base process satisfies
+\[
+\partial_t p_t = L_t^* p_t.
+\]
+Reward alignment asks us to construct a new process with generator \(\widetilde L_t\) and marginals \(\widetilde p_t\) such that
+\[
+\partial_t \widetilde p_t = \widetilde L_t^* \widetilde p_t,
+\]
+and such that \(\widetilde p_1\) approximates the reward-tilted target law or its path-space analogue.
+
+The engineering question is then:
+- should alignment modify sampling only,
+- should it distill a new transition operator,
+- should it directly retrain the generator,
+- should it use online reward-weighted updates,
+- should it operate in continuous or discrete state spaces?
+
+The papers below answer these questions in different ways.
+
+### 0.4 A useful structural dichotomy
+
+Across the literature, reward-alignment methods typically fall into two broad classes:
+
+1. **Inference-time control of a fixed base generator**  
+   The pretrained model remains unchanged, but sampling is altered through guidance, transition weighting, SMC, or reward-conditioned correction.
+
+2. **Amortized / fine-tuned alignment**  
+   One trains a new map, generator, or policy so that aligned generation becomes cheap at deployment time.
+
+This distinction will organize the lecture sequence.
+
+---
+
+## Lecture 1 — GLASS Flows: Transition Sampling for Alignment of Flow and Diffusion Models
+
 **Paper:** *GLASS Flows: Transition Sampling for Alignment of Flow and Diffusion Models*.
 
-### Core contribution
-GLASS introduces efficient **stochastic transition sampling** for alignment pipelines that previously relied on expensive SDE rollouts. Conceptually, it builds a transition kernel
+### 1.1 Problem setting
+
+A major obstacle in aligning flow and diffusion models is the tradeoff between:
+- **deterministic ODE sampling**, which is cheap but weak for exploration and reward-search,
+- **full SDE sampling**, which preserves stochasticity but can be expensive.
+
+GLASS addresses the middle regime: it seeks stochastic transition operators that preserve the useful geometry of the pretrained model while enabling efficient reward-aware sampling.
+
+### 1.2 Transition-operator perspective
+
+Let the pretrained base model induce short-time transitions
 \[
-K_t^{\text{GLASS}}(x,\mathrm dy)
+K^{\text{base}}_{t+h\mid t}(x,dy).
 \]
-from a pretrained flow/diffusion model so that we retain stochasticity (needed for search/SMC/reward steering) while preserving much of ODE-like efficiency.
+GLASS constructs a new transition operator
+\[
+K^{\text{GLASS}}_{t+h\mid t}(x,dy)
+\]
+that is cheap to sample from, retains controlled stochasticity, and is suitable for alignment-time procedures such as search, SMC, or reward reweighting.
 
-### GM interpretation
-- Base model gives generator/path \((L_t,p_t)\).
-- GLASS gives a practical aligned transition operator usable by reward samplers.
-- This is a computational realization of GM Principle 3/4 in an alignment setting: keep same modeling objects (Markov transitions/generators), change the sampling/training mechanics for reward objectives.
+Conceptually, this means that GLASS does not only change terminal samples; it changes the **transition geometry** by supplying a practical stochastic kernel compatible with the pretrained dynamics.
 
-### Why it matters
-It removes the usual tradeoff:
-- deterministic ODE sampling: fast but weak for reward exploration,
-- full SDE sampling: expressive but expensive.
+### 1.3 GM interpretation
 
-GLASS provides an intermediate that supports Feynman--Kac-style steering and transition-based alignment at scale.
+In GM language, a Markov model is defined by its generator or equivalently by its infinitesimal transition law. GLASS is therefore naturally interpreted as an **approximate aligned transition mechanism** built on top of a pretrained generator family.
+
+If the base law is governed by \((L_t,p_t)\), then GLASS provides a tractable kernel-level approximation to the aligned process that one would ideally obtain by reward tilting the path measure. It is not merely a heuristic sampler; it is an approximation to a new Markov evolution.
+
+### 1.4 Why stochasticity matters mathematically
+
+Reward alignment generally benefits from sampling diversity because the aligned objective often depends on rare-event discovery. Deterministic transport maps may be too rigid: once the trajectory is fixed by the initial seed, there is no local exploration around promising regions. Stochastic transitions instead allow the process to explore local neighborhoods, making particle-based and reward-weighted methods viable.
+
+From the Feynman--Kac perspective, one often needs to repeatedly propagate and reweight a cloud of candidate trajectories. GLASS provides the missing object that makes such propagation computationally feasible in flow/diffusion settings.
+
+### 1.5 Theoretical role in the alignment stack
+
+GLASS should be read as a **sampling-layer paper**:
+- it does not fundamentally redefine the base target law,
+- it makes the aligned path law computationally accessible,
+- it provides the transition-level substrate on which stronger alignment procedures can operate.
+
+That is why it is best understood before map distillation papers such as Diamond Maps.
 
 ---
 
-## 2.2 Diamond Maps (arXiv:2602.05993)
-**Paper:** *Diamond Maps: Efficient Reward Alignment via Stochastic Flow Maps*.
+## Lecture 2 — Diamond Maps: Efficient Reward Alignment via Stochastic Flow Maps
 
-### Core idea
-Diamond Maps distill expensive aligned transition dynamics into a **stochastic map model** for efficient inference-time alignment.
+**Paper:** *Diamond Maps: Efficient Reward Alignment via Stochastic Flow Maps* (arXiv:2602.05993).
 
-A standard aligned target is written as
+### 2.1 Central objective
+
+Diamond Maps starts from the observation that high-quality aligned samplers may be too expensive to run online. If a powerful teacher sampler already produces approximate aligned samples from
 \[
-\pi(x)\propto p_{\text{base}}(x)e^{r(x)}.
+\pi(x) \propto p_{\text{base}}(x)e^{r(x)},
 \]
-Distillation objective (map-to-teacher matching) is typically KL-type:
+then one can attempt to **distill** that aligned behavior into a cheap stochastic map.
+
+### 2.2 Distillation objective
+
+The core mathematical form is teacher-student distribution matching, typically expressed as a KL minimization:
 \[
-\min_{\phi} D_{\mathrm{KL}}\big(p_{\text{teacher}}\|p_\phi\big).
+\min_\phi D_{\mathrm{KL}}(p_{\text{teacher}}\|p_\phi).
 \]
+Here \(p_{\text{teacher}}\) is the distribution induced by the expensive aligned process, while \(p_\phi\) is the learned stochastic flow map.
 
-Alignment-time objective is regularized reward maximization:
+This objective says: instead of solving the reward-alignment control problem from scratch at inference time, learn a fast amortized approximation to the aligned Markov evolution.
+
+### 2.3 Variational meaning
+
+The aligned target often arises from regularized reward maximization:
 \[
-\max_{p_\phi}\;\mathbb E_{x\sim p_\phi}[r(x)]-\beta D_{\mathrm{KL}}(p_\phi\|p_{\text{base}}).
+\max_q \; \mathbb E_q[r(x)] - \beta D_{\mathrm{KL}}(q\|p_{\text{base}}).
 \]
+Diamond Maps inherits this structure indirectly. The teacher is already solving or approximating the regularized reward-alignment problem; the student then distills the resulting aligned law.
 
-### GM interpretation
-- Teacher dynamics (e.g., GLASS transitions) correspond to an implicit aligned generator process.
-- Diamond map is an amortized approximation to that aligned Markov evolution.
-- In GM language: learn a low-cost surrogate parameterization \(F_t^\phi\) that preserves reward-aligned marginals and transition behavior needed for SMC/search/value estimation.
+Thus, Diamond Maps is a **second-order approximation strategy**:
+- first solve alignment approximately using a strong but costly process,
+- then compress that aligned dynamics into a cheaper stochastic map.
 
-### Application emphasis
-Efficient reward alignment for high-cost generation settings (notably text-to-image inference pipelines).
+### 2.4 GM interpretation
+
+GM parameterizes a Markov generator through learnable objects \(F_t\). Diamond Maps can be read as learning an amortized surrogate \(F_t^\phi\) that preserves the reward-aligned marginals and transition behavior of the teacher. In other words, the paper replaces repeated expensive control with a learned **operator surrogate**.
+
+This is important conceptually: reward alignment is still generator design, but Diamond Maps moves that design into an amortized approximation regime.
+
+### 2.5 Why this matters
+
+In practical systems, alignment must often be deployed many times. A slow teacher process may be acceptable during research but not at serving time. Diamond Maps therefore answers a deployment question central to aligned generation:
+
+> Can we retain the geometry of reward-aware stochastic transport without paying the full alignment cost at test time?
+
+Its answer is yes, by learning a stochastic map that approximates the teacher process closely enough.
+
+### 2.6 Limitation and theory tension
+
+The main tension is compression error. If the student map underfits the aligned teacher, then reward performance drops; if it overfits narrow reward modes, diversity collapses. Thus the paper lives in the classical triple tradeoff among reward, fidelity to the base law, and amortization quality.
 
 ---
 
-## 2.3 Energy-based Generator Matching (EGM) (arXiv:2505.19646)
+## Lecture 3 — Energy-Based Generator Matching (EGM): Reward as Energy, Generator as Sampler
+
 **Paper:** *Energy-based generator matching: A neural sampler for general state space*.
 
-### Core idea
-EGM replaces “data distribution target” with an **energy-defined target**:
-\[
-\pi(x)=\frac{e^{-E(x)}}{Z},\quad Z=\int e^{-E(x)}\,dx,
-\]
-and trains a Markov generator model directly toward this target, including continuous/discrete/mixed spaces.
+### 3.1 Shift in viewpoint
 
-A canonical training form is KL minimization:
+EGM changes the target-specification layer. Instead of saying “match a data distribution,” it says “sample from an energy-defined target law”
+\[
+\pi(x)=\frac{e^{-E(x)}}{Z}.
+\]
+If we define
+\[
+E(x) = -\beta r(x),
+\]
+then reward alignment becomes an energy-based sampling problem.
+
+This is conceptually powerful because it removes the need to begin from a normalized data law. The target may be specified only up to an unknown partition function, yet training can still proceed.
+
+### 3.2 KL objective and reward form
+
+A canonical optimization target is
 \[
 \min_\theta D_{\mathrm{KL}}(p_\theta\|\pi)
-=\min_\theta\;\mathbb E_{x\sim p_\theta}[\log p_\theta(x)+E(x)] + \text{const}.
+= \min_\theta \; \mathbb E_{x\sim p_\theta}[\log p_\theta(x) + E(x)] + \text{const}.
 \]
-
-Since \(\pi\) is unnormalized, EGM uses self-normalized importance weights (SNIS), e.g.
+When \(E=-\beta r\), this becomes
 \[
-\widetilde w_i=\frac{w_i}{\sum_j w_j},\qquad
-w_i\propto \frac{e^{-E(x_i)}}{p_\theta(x_i)},
+\min_\theta \; \mathbb E_{x\sim p_\theta}[\log p_\theta(x) - \beta r(x)] + \text{const},
 \]
-and estimates expectations by \(\sum_i \widetilde w_i f(x_i)\).
+which is precisely reward seeking regularized by model entropy / likelihood structure.
 
-### GM interpretation
-This is a direct extension of GM/CGM to **reward-as-energy** supervision.\
-If we set \(E(x)=-\beta r(x)\), EGM is exactly reward alignment by generator matching to a tilted target.
+### 3.3 Importance weighting and normalization difficulty
 
-### New concept vs previous notes
-The key new step is not generator decomposition, but **target specification via unnormalized energy/reward** and variance-controlled estimation for training.
+Because \(\pi\) is unnormalized, expectations under \(\pi\) cannot usually be computed directly. EGM therefore uses self-normalized importance sampling (SNIS):
+\[
+\widetilde w_i = \frac{w_i}{\sum_j w_j},
+\qquad
+w_i \propto \frac{e^{-E(x_i)}}{p_\theta(x_i)}.
+\]
+Then
+\[
+\mathbb E_{x\sim \pi}[f(x)] \approx \sum_i \widetilde w_i f(x_i).
+\]
+
+This is theoretically significant because it makes reward alignment possible even when the aligned target is only known up to proportionality.
+
+### 3.4 GM interpretation
+
+EGM is the most direct reward-alignment extension of GM. GM says: design generators to realize a target path law. EGM says: let the target be defined by an energy rather than by data samples. The generator then becomes a neural sampler for the energy-defined aligned law.
+
+So, relative to previous GM notes, the novelty is not generator decomposition; it is **target specification under unnormalized reward-defined measures**.
+
+### 3.5 Why it generalizes well
+
+Because the framework is stated on general state spaces, it naturally extends to:
+- continuous domains,
+- discrete domains,
+- hybrid domains,
+- mixed compositional generation problems.
+
+That makes EGM especially relevant when reward alignment must be performed in spaces that do not fit simple Euclidean score-matching assumptions.
+
+### 3.6 Main theoretical caveat
+
+Importance-weighted estimation can have high variance. Thus the practicality of reward-as-energy alignment depends critically on proposal quality, estimator stability, and the overlap between current model mass and high-reward regions.
 
 ---
 
-## 2.4 Flow-GRPO (arXiv:2505.05470)
+## Lecture 4 — Flow-GRPO: Training Flow Matching Models via Online RL
+
 **Paper:** *Flow-GRPO: Training Flow Matching Models via Online RL*.
 
-### Core idea
-Flow-GRPO adapts online policy-gradient style optimization (GRPO family) to flow-matching generators.
+### 4.1 The central problem
 
-Group-relative advantage form:
+Flow matching is usually trained by supervised objectives derived from a prescribed probability path. But reward alignment is not supervised: one observes scalar rewards or preferences only after generating candidates. Flow-GRPO therefore imports online RL ideas into flow-model training.
+
+### 4.2 Relative-advantage form
+
+A representative group-relative advantage is
 \[
 A_i = r_i - \frac{1}{N}\sum_{j=1}^N r_j.
 \]
-A representative policy-gradient-style objective is:
+This centers rewards within a sampled group and emphasizes relative preference rather than absolute scale.
+
+A policy-gradient-style objective then takes the form
 \[
 \mathcal L_{\text{GRPO}}(\theta)
-= -\mathbb E\Big[\sum_i A_i\log p_\theta(\text{trajectory}_i\mid \text{context})\Big].
+= -\mathbb E\left[\sum_i A_i \log p_\theta(\text{trajectory}_i\mid \text{context})\right].
 \]
 
-### ODE-to-SDE bridge
-Flow models are often sampled by deterministic ODE trajectories. RL exploration needs stochasticity, so Flow-GRPO uses an SDE view:
+Although the exact implementation details depend on the flow parameterization, the conceptual point is clear: update generator parameters in the direction of trajectories with higher empirical advantage.
+
+### 4.3 Why an ODE-only picture is insufficient
+
+A pure flow model is often interpreted through deterministic ODE trajectories. But RL-style optimization benefits from exploration. Hence Flow-GRPO introduces or leverages an SDE interpretation,
 \[
-\mathrm dX_t = f_\theta(X_t,t)\,dt + g_\theta(X_t,t)\,dW_t,
+dX_t = f_\theta(X_t,t)dt + g_\theta(X_t,t)dW_t,
 \]
-with design choices that preserve target marginals while enabling stochastic rollout diversity for RL updates.
+so that stochastic rollouts can be used for reward discovery while still respecting the flow-matching structure.
 
-### GM interpretation
-- Flow generator \(L_t\) is updated with reward-weighted gradients.
-- This is GM Principle 4 with reward-dependent weighting/online sampling instead of pure supervised CGM.
-- Alignment occurs by learning generator parameters that increase expected reward while controlling degeneration.
+This is a deep conceptual move: deterministic transport is recast as part of a stochastic family suitable for online optimization.
+
+### 4.4 GM interpretation
+
+GM teaches that a model class is specified by generators. Flow-GRPO says that those generator parameters need not be learned only by supervised conditional losses; they can also be updated by reward-weighted online objectives. In that sense, Flow-GRPO is a **reinforcement-learning instantiation of GM Principle 4**: generator parameters are optimized to satisfy a task objective, not merely a data-fit criterion.
+
+### 4.5 What is gained
+
+- reward-aware adaptation beyond the offline dataset,
+- online discovery of behaviors absent from demonstrations,
+- principled integration of flow-model structure with RL-style exploration.
+
+### 4.6 What becomes difficult
+
+Online reward optimization risks mode collapse, reward hacking, or loss of base-model fidelity. Hence Flow-GRPO should be understood as a controlled generator-retargeting method, not as unconstrained reward maximization.
 
 ---
 
-## 2.5 Discrete Flow Maps (arXiv:2604.09784)
-**Paper:** *Discrete Flow Maps*.
+## Lecture 5 — Discrete Flow Maps
 
-### Core idea
-For discrete data (e.g., language), map training must respect simplex geometry.\
-Instead of Euclidean regression losses, use simplex-consistent losses such as cross-entropy/KL.
+**Paper:** *Discrete Flow Maps* (arXiv:2604.09784).
 
-Let \(\Delta_K=\{p\in\mathbb R^K_+:\sum_k p_k=1\}\).\
-A map outputs distributions on \(\Delta_K\), trained with e.g.
+### 5.1 Why discrete spaces are special
+
+In discrete generation, the model outputs probabilities over tokens or categories. The ambient geometry is therefore the simplex
 \[
-\mathcal L(\theta)=\mathbb E\big[\mathrm{KL}(q(\cdot\mid x)\|\mu_\theta(\cdot\mid x))\big].
+\Delta_K = \{p\in\mathbb R_+^K : \sum_{k=1}^K p_k = 1\},
+\]
+not Euclidean space.
+
+This changes the mathematics in an essential way. Euclidean regression losses may be poorly aligned with the geometry of probability vectors, whereas cross-entropy and KL divergences are natural because they respect simplex structure.
+
+### 5.2 Proper training objective
+
+A standard objective is
+\[
+\mathcal L(\theta)
+= \mathbb E\big[ D_{\mathrm{KL}}(q(\cdot\mid x) \| \mu_\theta(\cdot\mid x)) \big],
+\]
+where \(q\) is a target distribution and \(\mu_\theta\) is the learned discrete map.
+
+The significance is not just numerical convenience. The divergence is part of the model definition because it encodes what it means to move correctly on the simplex.
+
+### 5.3 Generator interpretation in discrete space
+
+Discrete flow maps connect naturally to CTMC-style generators
+\[
+[L_t f](x)=\sum_{y\in S}Q_t(y\mid x)(f(y)-f(x)),
+\]
+with forward equation
+\[
+\partial_t p_t(x) = \sum_y \big(Q_t(x\mid y)p_t(y)-Q_t(y\mid x)p_t(x)\big).
 \]
 
-### GM interpretation
-This is the discrete-space analogue of choosing a valid generator parameterization and divergence in CGM.\
-For reward alignment, replace \(q\) by reward-tilted or advantage-weighted targets over tokens/sequences.
+Thus, discrete alignment is still generator alignment, but the admissible operators and losses must respect discrete probability geometry.
 
-### Application angle
-Enables fast non-autoregressive discrete generation and provides an alignment-ready interface in token space.
+### 5.4 Reward-alignment relevance
+
+For reward alignment, one replaces the target distribution \(q\) by reward-tilted token or sequence targets, or by advantage-weighted local targets. This makes Discrete Flow Maps an important bridge between token-level generation and alignment-time optimization.
+
+### 5.5 Broader significance
+
+This paper matters because many aligned systems eventually pass through discrete bottlenecks:
+- language tokens,
+- classifier outputs,
+- latent mode variables,
+- discrete decision policies.
+
+A reward-alignment theory that ignores simplex geometry is therefore incomplete.
 
 ---
 
-## 2.6 DRIFT / Discrete Flow Matching for RL (arXiv:2605.12379)
+## Lecture 6 — DRIFT / Discrete Flow Matching for Offline-to-Online Reinforcement Learning
+
 **Paper:** *Discrete Flow Matching for Offline-to-Online Reinforcement Learning*.
 
-### Core idea
-A CTMC/discrete-flow policy pretrained offline is fine-tuned online using advantage weighting and trajectory-level regularization.
+### 6.1 Offline-to-online transition
 
-Representative structure:
+DRIFT addresses a setting where one begins with a pretrained discrete-flow or CTMC-style policy learned from offline data, then performs online improvement using rewards collected during deployment.
+
+This is the discrete counterpart of the continuous alignment story: start from a useful base generator, then retarget it toward higher reward while controlling departure from pretrained behavior.
+
+### 6.2 Advantage-weighted objective
+
+A representative form is
 \[
 \mathcal L_{\text{AW-DFM}}(\theta)
-=\mathbb E\Big[w(s,a)\,\ell_{\text{DFM}}(\theta;s,a,t)\Big],
+= \mathbb E\Big[w(s,a)\,\ell_{\text{DFM}}(\theta;s,a,t)\Big],
 \]
-where \(w(s,a)\) is advantage-derived. Path-space regularization adds:
+where \(w(s,a)\) is advantage-derived and \(\ell_{\text{DFM}}\) is a discrete-flow matching loss.
+
+The structure is revealing:
+- the base discrete-flow loss remains,
+- reward enters through importance or advantage weighting,
+- the generator is shifted toward higher-value actions without discarding the pretrained geometry.
+
+### 6.3 Path-space regularization
+
+To prevent instability, one often adds a path regularizer:
 \[
-\mathcal L_{\text{total}}=\mathcal L_{\text{AW-DFM}}+\lambda\,\mathcal L_{\text{path-reg}}.
+\mathcal L_{\text{total}} = \mathcal L_{\text{AW-DFM}} + \lambda \mathcal L_{\text{path-reg}}.
 \]
+This matters because online reward optimization can distort not only terminal behavior but the full trajectory law. Path regularization constrains the entire generated dynamics to remain close to the useful base process.
 
-### GM interpretation
-- Discrete generator/rate matrix learning (from GM + lecture Section 7) is retained.
-- Reward alignment acts through advantage-weighted target flows plus regularization to keep dynamics near useful pretrained behavior.
-- This is a clear example of **reward alignment as generator retargeting on discrete state spaces**.
+### 6.4 GM interpretation
 
----
+In GM terms, DRIFT is a clean example of **generator retargeting on discrete state spaces**. The base rate matrix or discrete transition law is not discarded; it is updated using reward-sensitive weights while preserving the structural form that makes the model trainable.
 
-## 3. Unifying Algorithmic Template (GM-Centric)
+### 6.5 Conceptual importance
 
-Given pretrained GM model \(L_t^{\theta_0}\):
-
-1. **Specify reward signal** \(r\) (terminal or path-level).\
-2. **Define aligned target law** (Gibbs/Feynman--Kac tilt).\
-3. **Choose alignment engine**:
-   - transition steering (GLASS/FKS),
-   - amortized map distillation (Diamond),
-   - energy-target matching (EGM),
-   - online RL weighting (Flow-GRPO/DRIFT),
-   - simplex/discrete map objectives (Discrete Flow Maps).
-4. **Train/update generator parameterization** with KL/Bregman/reward-weighted losses.
-5. **Sample with stochastic transitions** when exploration/search is needed.
-6. **Evaluate reward-quality-diversity tradeoff** (reward, fidelity, diversity, robustness to reward hacking).
-
-This is exactly “reward alignment as an application layer on top of GM”.
+DRIFT closes a gap in the alignment literature. Much alignment theory is developed for continuous samplers or language-model-style objectives. DRIFT shows that offline-to-online reward alignment can also be expressed in the language of discrete flows and CTMC generators.
 
 ---
 
-## 4. Key Definitions (New in Reward-Alignment Context)
+## Lecture 7 — Unified View: What the Six Papers Are Actually Doing
 
-1. **Reward-tilted target distribution**
+### 7.1 Same objective, different intervention points
+
+All six lectures can be organized by **where** they intervene in the aligned-generation pipeline:
+
+- **GLASS** modifies transition sampling to make aligned exploration feasible.
+- **Diamond Maps** amortizes expensive aligned dynamics into a fast stochastic map.
+- **EGM** changes target specification by treating reward as an energy.
+- **Flow-GRPO** performs online reward-weighted updates of continuous generator parameters.
+- **Discrete Flow Maps** supplies the right geometry and loss structure for discrete aligned maps.
+- **DRIFT** performs offline-to-online reward alignment in discrete-flow settings.
+
+### 7.2 A common master objective
+
+At a high level, each method can be understood as approximating some solution to
 \[
-\pi(x)\propto p(x)e^{\beta r(x)}.
+\max_{\mathcal P} \; \mathbb E_{X\sim \mathcal P}[R(X)] - \lambda \, \mathrm{Reg}(\mathcal P \| \mathcal P_{\text{base}}),
 \]
+where:
+- \(\mathcal P\) may be a terminal law, path law, map, or generator-induced process,
+- \(R\) is a terminal or trajectory reward,
+- \(\mathrm{Reg}\) measures deviation from the pretrained process.
 
-2. **Path-space tilt (Feynman--Kac)**
-\[
-\frac{d\Pi^{\text{align}}}{d\Pi^{\text{base}}}(X_{0:1})\propto e^{\beta R(X_{0:1})}.
-\]
+The difference across papers lies in the choice of:
+- representation of \(\mathcal P\),
+- optimization strategy,
+- sampling scheme,
+- geometry of the state space,
+- regularizer or trust region.
 
-3. **Amortized alignment map**
-A stochastic map \(T_\phi\) trained to approximate aligned transition/output laws with reduced inference cost.
+### 7.3 Continuous vs discrete alignment
 
-4. **Advantage-weighted generator matching**
-GM/DFM losses reweighted by reward-derived advantages to shift generator mass toward high-reward regions.
+The lecture sequence also clarifies a key dichotomy:
+- In continuous spaces, reward alignment often looks like stochastic control over ODE/SDE dynamics.
+- In discrete spaces, reward alignment becomes a problem of retargeting rate matrices, token distributions, or simplex-valued maps.
 
-5. **Path-space regularization**
-A penalty on entire trajectory laws (not only terminal samples), stabilizing online alignment and preserving diversity.
+GM is valuable precisely because it gives one language that covers both.
 
----
+### 7.4 Why GM is the right meta-framework
 
-## 5. Applications Reported Across the Main Papers
+GM is not merely another training loss. It is a unifying theory of Markov generative models at the generator level. That makes it the right conceptual framework for reward alignment because every alignment method ultimately changes one of the following:
+- the target law,
+- the transition law,
+- the generator parameters,
+- the divergence used to compare local dynamics,
+- the sampling process used to realize the aligned law.
 
-- **Text-to-image alignment:** higher preference/reward scores with better compute scaling (GLASS, Diamond, Flow-GRPO).
-- **General-state-space reward sampling:** continuous + discrete + multimodal generation from energy/reward functions (EGM).
-- **Discrete decision/control problems:** offline-to-online RL improvements via discrete flow/CTMC alignment (DRIFT).
-- **Fast discrete generation:** simplex-consistent map training with alignment hooks in token probability space (Discrete Flow Maps).
-
----
-
-## 6. Additional Papers (Main Concepts Only)
-
-### 6.1 arXiv:2501.09685
-**Inference-Time Alignment in Diffusion Models with Reward-Guided Generation: Tutorial and Review**
-- Unifies inference-time reward alignment methods (guidance, SMC/search, value-based steering).
-- Important for this note because it frames alignment as **sampling/control over pretrained generative trajectories**, exactly compatible with GM’s generator/process viewpoint.
-
-### 6.2 arXiv:2604.27147
-**How to Guide Your Flow: Few-Step Alignment via Flow Map Reward Guidance**
-- Main concept: few-step alignment by reward-guided flow-map updates, aiming to reduce alignment compute while retaining quality.
-- Relevance to GM: efficient approximation of reward-aligned generator dynamics in low-step regimes.
-
-### 6.3 arXiv:2502.06061
-**Online Reward-Weighted Fine-Tuning of Flow Matching with Wasserstein Regularization**
-- Main concept: online reward-weighted flow matching with explicit transport regularization (Wasserstein) to avoid collapse/reward hacking.
-- GM view: reward-weighted CGM-style updates + geometric regularization to preserve distributional coverage.
+All of those are native GM objects.
 
 ---
 
-## 7. What Is New Relative to the Previous Two Documents
+## Lecture 8 — Practical Design Recipe for Reading Future Reward-Alignment Papers
 
-This Part III adds:
-- reward/objective tilting as first-class target specification,
-- inference-time alignment as Markov transition control,
-- map distillation for efficient aligned sampling,
-- online RL fine-tuning of flow/discrete generators,
-- path-space regularization in alignment loops.
+When reading a new paper in this area, the following checklist is useful.
 
-It intentionally does **not** re-derive:
-- continuity/Fokker--Planck basics,
-- conditional-to-marginal posterior identities,
-- full GM generator decomposition proofs,
-- core CTMC preliminaries from lecture/companion notes.
+### 8.1 Step 1: Identify the base object
+
+Ask whether the paper starts from:
+- a pretrained diffusion model,
+- a flow model,
+- a CTMC/discrete flow model,
+- a generic GM generator.
+
+### 8.2 Step 2: Identify the aligned target
+
+Ask whether reward enters as:
+- a Gibbs tilt,
+- a path-space Feynman--Kac weight,
+- an energy function,
+- an advantage-weighted surrogate,
+- a distillation target from an aligned teacher.
+
+### 8.3 Step 3: Identify the intervention point
+
+Ask whether the method changes:
+- only inference-time sampling,
+- the transition kernel,
+- the generator parameters,
+- the objective function,
+- the geometry/divergence used in the local loss.
+
+### 8.4 Step 4: Identify the regularizer
+
+Every successful alignment method controls deviation from the base model. The regularizer may be explicit (KL, Wasserstein, path regularization) or implicit (teacher imitation, constrained transition design).
+
+### 8.5 Step 5: Ask what is being preserved
+
+A strong method preserves some subset of the following:
+- sample quality,
+- diversity,
+- mode coverage,
+- stability,
+- computational efficiency,
+- compatibility with the pretrained generator geometry.
+
+This checklist reveals that most papers differ more in engineering choice than in underlying mathematics.
 
 ---
 
-## 8. Practical Takeaway
+## Final Summary
 
-If GM is the “physics” of generative dynamics through generators and KFE, then reward alignment is an **optimal-control layer** that retargets these dynamics toward preference-weighted distributions. The recent papers above can be read as different engineering choices for this same mathematical program: change the effective generator/transition law to optimize reward while preserving sample quality, diversity, and tractability.
+These lecture notes present reward alignment as a single mathematical program:
+
+1. Start with a pretrained Markov generative process.
+2. Specify a reward-tilted terminal or path-space law.
+3. Construct or approximate aligned transitions or generators.
+4. Control deviation from the pretrained law through KL, path, transport, or teacher-based regularization.
+5. Deploy the aligned process in either continuous or discrete state spaces.
+
+Under this view:
+- **GLASS** gives efficient stochastic transitions,
+- **Diamond Maps** gives amortized aligned maps,
+- **EGM** gives reward-as-energy target matching,
+- **Flow-GRPO** gives online RL over continuous generators,
+- **Discrete Flow Maps** gives simplex-correct discrete alignment,
+- **DRIFT** gives offline-to-online discrete generator retargeting.
+
+So the right slogan is:
+
+> Reward alignment is not outside Generator Matching. It is Generator Matching with a reward-defined target law and a carefully chosen mechanism for realizing the new aligned dynamics.
